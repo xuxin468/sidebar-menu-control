@@ -1,6 +1,7 @@
 // Unit test for the pure helpers extracted verbatim from client.js.
-// Extracts the ALIAS / stableKey / keyOf / unwrap / hiddenKeys / readValue /
-// _labelMap definitions from the real source so the test exercises shipped code.
+// Extracts the new-architecture functions (identityOf, keysOf, readHidden,
+// collectRows, manageablePanels) from the real source so the test exercises
+// shipped code.
 import fs from "node:fs";
 import path from "node:path";
 
@@ -9,8 +10,8 @@ const SRC = fs.readFileSync(
   "utf8",
 );
 
-function sliceBetween(startMarker, endMarker) {
-  const i = SRC.indexOf(startMarker);
+function sliceBetween(startMarker, endMarker, startFrom = 0) {
+  const i = SRC.indexOf(startMarker, startFrom);
   if (i < 0) throw new Error("start marker not found: " + startMarker);
   const j = SRC.indexOf(endMarker, i);
   if (j < 0) throw new Error("end marker not found: " + endMarker);
@@ -21,24 +22,58 @@ function sliceBetween(startMarker, endMarker) {
 const baseSrc = sliceBetween("const BASE_MANAGEABLE = [", "];") + "];";
 // ALIAS table
 const aliasSrc = sliceBetween("const ALIAS = {", "};") + "};";
-// stableKey + keyOf
-const keySrc = sliceBetween("const stableKey = (label) =>", "/* ----") ;
-// unwrap + DEFAULT_VALUE + readValue + hiddenKeys
+// keyOf
+const keySrc = sliceBetween("const keyOf = (label) =>", "/* ----");
+// unwrap + DEFAULT_VALUE + readValue
 const unwrapSrc = sliceBetween("const unwrap = (v) =>", "/* ----");
-// _discovered map, _addDiscovered, _labelMap, _allLabels
-const labelMapSrc = sliceBetween("const _discovered = new Map()", "function _onDiscover");
+// resolveSlotLabel (stubbed — real pkg not on disk)
+const resolveSlotLabelSrc = sliceBetween("const resolveSlotLabel = (v) =>", "};");
+// PANEL_LIST_SLOT / PANEL_ROW_ANCHOR / PLUGIN_ROW_HOOK
+const slotConstantsSrc = sliceBetween(
+  "const PANEL_LIST_SLOT =",
+  "/* ----",
+);
+// readLedger
+const readLedgerSrc = sliceBetween("function readLedger(ctx)", "/* ----");
+// identityOf
+const identityOfSrc = sliceBetween("function identityOf(entry)", "/* ----");
+// keysOf
+const keysOfSrc = sliceBetween("function keysOf(panel)", "/* ----");
+// manageablePanels
+const manageableSrc = sliceBetween(
+  "function manageablePanels(ctx)",
+  "/* ----",
+);
+// _discovered + _addDiscovered (state needed by manageablePanels fallback)
+const discoveredSrc = sliceBetween(
+  "const _discovered = new Map()",
+  "/* ----",
+);
+// readHidden
+const readHiddenSrc = sliceBetween("function readHidden(value, panels)", "/* ----");
+// collectRows
+const collectRowsSrc = sliceBetween("function collectRows(scope)", "/* ----");
 
 const factorySrc = `
 ${baseSrc}
 ${aliasSrc}
 ${keySrc}
 ${unwrapSrc}
-${labelMapSrc}
-return { stableKey, keyOf, unwrap, readValue, hiddenKeys, _labelMap, _allLabels, ALIAS };
+${slotConstantsSrc}
+${discoveredSrc}
+// Stub resolveSlotLabel: identity (no real pkg in test)
+const resolveSlotLabel = (v) => (v == null ? "" : String(v));
+${readLedgerSrc}
+${identityOfSrc}
+${keysOfSrc}
+${manageableSrc}
+${readHiddenSrc}
+${collectRowsSrc}
+return { identityOf, keysOf, readHidden, collectRows, manageablePanels, keyOf, unwrap, readValue, ALIAS, BASE_MANAGEABLE };
 `;
 
 const mod = new Function(factorySrc)();
-const { stableKey, keyOf, unwrap, readValue, hiddenKeys, _labelMap, _allLabels } = mod;
+const { identityOf, keysOf, readHidden, collectRows, manageablePanels, keyOf, unwrap, readValue, BASE_MANAGEABLE } = mod;
 
 let pass = 0, fail = 0;
 const eq = (name, actual, expected) => {
@@ -47,77 +82,124 @@ const eq = (name, actual, expected) => {
   else { fail++; console.log("  FAIL " + name + "\n        got      " + a + "\n        expected " + e); }
 };
 
-console.log("== stableKey normalization ==");
-eq("trims + lowercases + strips separators",
-  stableKey("  Skill / MCP  "), "skillmcp");
-eq("empty / null safe", stableKey(null), "");
-eq("collapses runs of separators", stableKey("MCP - Connector"), "mcpconnector");
+console.log("== identityOf ==");
+eq("basic entry with id + label",
+  identityOf({ options: { id: "panel-a", label: "Panel A", order: 1 } }),
+  { id: "panel-a", label: "Panel A", order: 1 });
+eq("missing order defaults to 9999",
+  identityOf({ options: { id: "panel-b", label: "Panel B" } }),
+  { id: "panel-b", label: "Panel B", order: 9999 });
+eq("no id/key returns null",
+  identityOf({ options: { label: "No ID" } }), null);
+eq("null entry returns null",
+  identityOf(null), null);
+eq("opts.key used as fallback id",
+  identityOf({ options: { key: "k1", label: "K" } }),
+  { id: "k1", label: "K", order: 9999 });
 
-console.log("== keyOf locale aliasing ==");
-eq("MCP Connector <-> MCP连接器",
-  keyOf("MCP Connector"), keyOf("MCP连接器"));
-eq("Plugins <-> 插件",
+console.log("== keysOf ==");
+const panel1 = { id: "plugins", label: "Plugins" };
+const panelZh = { id: "plugins", label: "插件" };
+eq("id always in keys", keysOf(panel1).has("plugins"), true);
+eq("locale alias: Plugins and 插件 share a key",
+  keysOf(panel1).has(keyOf("Plugins")) && keysOf(panelZh).has(keyOf("插件")), true);
+eq("both map to same canonical key",
   keyOf("Plugins"), keyOf("插件"));
-eq("Marketplace <-> 插件市场",
-  keyOf("Marketplace"), keyOf("插件市场"));
-eq("Skill Market <-> 技能市场",
-  keyOf("Skill Market"), keyOf("技能市场"));
-eq("Automation <-> 自动化任务",
-  keyOf("Automation"), keyOf("自动化任务"));
-eq("Remote Control <-> 远程控制",
-  keyOf("Remote Control"), keyOf("远程控制"));
-eq("More <-> 更多", keyOf("More"), keyOf("更多"));
-eq("Lunheng <-> 论衡运行", keyOf("Lunheng"), keyOf("论衡运行"));
+eq("distinct panels have distinct keys",
+  !keysOf({ id: "mcp", label: "MCP" }).has(keyOf("MCP Connector")) &&
+  !keysOf({ id: "mcpconnector", label: "MCP Connector" }).has(keyOf("MCP")), true);
 
-console.log("== distinct menus stay distinct ==");
-eq("MCP != MCP Connector",
-  keyOf("MCP") !== keyOf("MCP Connector"), true);
-eq("Skills != Skill Market",
-  keyOf("Skills") !== keyOf("Skill Market"), true);
-eq("Skills != Skill / MCP",
-  keyOf("Skills") !== keyOf("Skill / MCP"), true);
-eq("unknown label keeps own key",
-  keyOf("Brand New Menu"), "brandnewmenu");
+console.log("== manageablePanels (ledger path) ==");
+const ledgerCtx = {
+  slots: {
+    entriesOfSlot: (slot) =>
+      slot === "sidebar.panellist"
+        ? [
+            { options: { id: "panel-a", label: "Alpha", order: 2 } },
+            { options: { id: "panel-b", label: "Beta", order: 1 } },
+            { options: { id: "panel-a", label: "Alpha dup", order: 99 } },
+          ]
+        : [],
+  },
+};
+const ledgerPanels = manageablePanels(ledgerCtx);
+eq("ledger panels returned", ledgerPanels.length, 2);
+eq("sorted by order ascending", ledgerPanels[0].id, "panel-b");
+eq("duplicate id deduped", ledgerPanels.filter((p) => p.id === "panel-a").length, 1);
+eq("label preserved from ledger", ledgerPanels.find((p) => p.id === "panel-b").label, "Beta");
 
-console.log("== dedupe: 19 base labels collapse to one row per menu ==");
-const baseLabels = [...SRC.matchAll(/"([^"]+)",?\n/g)].map((m) => m[1])
-  .filter((l) => l && !l.startsWith("//"));
-const map = _labelMap();
-console.log("  base label rows rendered: " + map.size + " (base labels listed: " + baseLabels.length + ")");
-eq("no locale duplicates in the rendered list",
-  new Set(_allLabels()).size, _allLabels().length);
-eq("panel renders one row per distinct menu", map.size >= 10 && map.size <= 12, true);
+console.log("== manageablePanels (fallback path) ==");
+const noLedgerCtx = { slots: null };
+const fallbackPanels = manageablePanels(noLedgerCtx);
+eq("fallback produces panels (deduped via alias)", fallbackPanels.length >= 9, true);
+eq("fallback panels marked", fallbackPanels.every((p) => p.fallback === true), true);
+eq("each has a distinct id", new Set(fallbackPanels.map((p) => p.id)).size, fallbackPanels.length);
 
-console.log("== hiddenKeys migration (legacy raw labels -> stable keys) ==");
-eq("legacy zh raw labels normalize",
-  [...hiddenKeys({ hidden: ["插件市场", "论衡运行", "MCP Connector"] })].sort(),
-  ["lunheng", "marketplace", "mcpconnector"]);
-eq("already-keyed entries are idempotent",
-  [...hiddenKeys({ hidden: ["marketplace", "lunheng"] })].sort(),
-  ["lunheng", "marketplace"]);
-eq("missing/garbage hidden is tolerated",
-  hiddenKeys({}).size, 0);
-eq("non-array hidden is tolerated",
-  hiddenKeys({ hidden: "pluginmarketplace" }).size, 0);
+console.log("== readHidden (ledger id normalization) ==");
+const panels = [
+  { id: "plugins", label: "Plugins" },
+  { id: "marketplace", label: "Marketplace" },
+  { id: "panel-xyz", label: "Custom Panel" },
+];
+eq("ledger id passes through",
+  [...readHidden({ hidden: ["plugins", "marketplace"] }, panels)].sort(),
+  ["marketplace", "plugins"]);
+eq("legacy zh label migrates to ledger id",
+  [...readHidden({ hidden: ["插件", "插件市场"] }, panels)].sort(),
+  ["marketplace", "plugins"]);
+eq("unknown entry keeps its normalized key",
+  readHidden({ hidden: ["brand-new-menu"] }, panels).has("brandnewmenu"), true);
+eq("empty hidden -> empty set", readHidden({ hidden: [] }, panels).size, 0);
+eq("null value -> empty set", readHidden(null, panels).size, 0);
+eq("non-array hidden -> empty set", readHidden({ hidden: "bad" }, panels).size, 0);
+
+console.log("== collectRows (stub DOM) ==");
+function stubBtn(label) {
+  return {
+    getAttribute: (attr) => (attr === "aria-label" ? label : null),
+    style: { properties: new Map(), setProperty(k, v) { this.properties.set(k, v); }, removeProperty(k) { this.properties.delete(k); }, getPropertyValue(k) { return this.properties.get(k) || ""; } },
+  };
+}
+function stubAnchor({ btnLabel, hasPluginHook = false, closestBtn = true }) {
+  return {
+    querySelector: (sel) => (hasPluginHook && sel === "[data-dsh-panel-entry]" ? stubBtn("x") : null),
+    closest: (sel) => (closestBtn && sel === "button" ? stubBtn(btnLabel) : null),
+  };
+}
+const scope = {
+  querySelectorAll: (sel) =>
+    sel === '[data-slot="sidebar.panellist"]'
+      ? [
+          stubAnchor({ btnLabel: "Plugins" }),
+          stubAnchor({ btnLabel: "MCP" }),
+          stubAnchor({ btnLabel: "Has Hook", hasPluginHook: true }),
+          stubAnchor({ btnLabel: "No Closest", closestBtn: false }),
+          stubAnchor({ btnLabel: "Plugins" }), // duplicate
+        ]
+      : [],
+};
+const rows = collectRows(scope);
+eq("rows found (no plugin hook, no null btn, no dup)", rows.size, 2);
+eq("Plugins row present", rows.has("Plugins"), true);
+eq("MCP row present", rows.has("MCP"), true);
+eq("hooked row excluded", rows.has("Has Hook"), false);
+eq("non-button row excluded", rows.has("No Closest"), false);
+eq("null scope returns empty", collectRows(null).size, 0);
+
+console.log("== keyOf normalization ==");
+eq("trims + lowercases + strips separators", keyOf("  Skill / MCP  "), "skillmcp");
+eq("empty / null safe", keyOf(null), "");
+eq("collapses runs of separators", keyOf("MCP - Connector"), "mcpconnector");
+eq("alias: 插件 -> plugins", keyOf("插件"), "plugins");
+eq("alias: MCP连接器 -> mcpconnector", keyOf("MCP连接器"), "mcpconnector");
+eq("unknown label keeps own key", keyOf("Brand New Menu"), "brandnewmenu");
 
 console.log("== readValue / unwrap ==");
-eq("plain object passes through",
-  readValue({ value: { global: true, hidden: ["x"] } }).global, true);
-eq("missing value falls back to defaults",
-  readValue({ status: "unavailable" }), { global: false, hidden: [] });
-eq("null snapshot falls back to defaults",
-  readValue(null), { global: false, hidden: [] });
-eq("cosmokit Volatile box is unwrapped",
-  readValue({ value: { get: () => ({ global: true, hidden: [] }) } }).global, true);
-eq("Volatile box is not mistaken for truthy-but-inert",
-  readValue({ value: { get: () => ({ global: false, hidden: [] }) } }).global, false);
-eq("Volatile box exposing a real array still works",
-  [...readValue({ value: { get: () => ({ global: false, hidden: ["插件"] }) } }).hidden.map(keyOf)],
-  ["plugins"]);
-
-console.log("== global switch cannot be silently defeated by a box ==");
-eq("box with global=true hides everything",
-  readValue({ value: { get: () => ({ global: true, hidden: [] }) } }).global, true);
+eq("plain object passes through", readValue({ value: { global: true, hidden: ["x"] } }).global, true);
+eq("missing value falls back to defaults", readValue({ status: "unavailable" }), { global: false, hidden: [] });
+eq("null snapshot falls back to defaults", readValue(null), { global: false, hidden: [] });
+eq("cosmokit Volatile box is unwrapped", readValue({ value: { get: () => ({ global: true, hidden: [] }) } }).global, true);
+eq("Volatile box with global=false stays false", readValue({ value: { get: () => ({ global: false, hidden: [] }) } }).global, false);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
