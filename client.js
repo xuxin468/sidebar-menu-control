@@ -26,9 +26,11 @@ window.__ModuleLoader__.load({
     const NS = "sidebar-menu-control";
 
     /* ---------------------------------------------------------------- */
-    /*  Manageable panel labels (matched against button aria-label)       */
+    /*  Manageable panel labels                                            */
     /* ---------------------------------------------------------------- */
-    const MANAGEABLE = [
+    /*  Base list: known sidebar menu labels (English + Chinese).       */
+    /*  New menus are discovered dynamically at runtime — see below.     */
+    const BASE_MANAGEABLE = [
       "Plugins",
       "Skills",
       "MCP",
@@ -52,6 +54,39 @@ window.__ModuleLoader__.load({
     ];
 
     /* ---------------------------------------------------------------- */
+    /*  Dynamic discovery state                                            */
+    /* ---------------------------------------------------------------- */
+    /*  New sidebar menu items get a new aria-label. We discover them   */
+    /*  by scanning the sidebar DOM and add them to `_discovered`, then */
+    /*  notify the settings panel to re-render.                         */
+    const _discovered = new Set();
+    const _discoverListeners = [];
+
+    function _addDiscovered(label) {
+      if (!label || _discovered.has(label)) return;
+      _discovered.add(label);
+      _discoverListeners.forEach((cb) => {
+        try {
+          cb();
+        } catch (_) {
+          /* ignore */
+        }
+      });
+    }
+
+    function _allLabels() {
+      return [...new Set([...BASE_MANAGEABLE, ..._discovered])];
+    }
+
+    function _onDiscover(cb) {
+      _discoverListeners.push(cb);
+      return () => {
+        const i = _discoverListeners.indexOf(cb);
+        if (i >= 0) _discoverListeners.splice(i, 1);
+      };
+    }
+
+    /* ---------------------------------------------------------------- */
     /*  Settings section UI                                               */
     /* ---------------------------------------------------------------- */
     function SettingsSection(props) {
@@ -59,8 +94,12 @@ window.__ModuleLoader__.load({
       const [snapshot, setSnapshot] = React.useState(form.getSnapshot());
 
       React.useEffect(() => {
-        const off = form.subscribe(() => setSnapshot(form.getSnapshot()));
-        return off;
+        const offForm = form.subscribe(() => setSnapshot(form.getSnapshot()));
+        const offDiscover = _onDiscover(() => setSnapshot(form.getSnapshot()));
+        return () => {
+          offForm();
+          offDiscover();
+        };
       }, [form]);
 
       const value = snapshot.value ?? { global: false, hidden: [] };
@@ -143,7 +182,7 @@ window.__ModuleLoader__.load({
         h(
           "div",
           { style: { borderTop: "1px solid rgba(255,255,255,0.08)", paddingTop: 8 } },
-          MANAGEABLE.map((label) => row(label)),
+          _allLabels().map((label) => row(label)),
         ),
       );
     }
@@ -188,13 +227,22 @@ window.__ModuleLoader__.load({
           if (!root) return;
           root.querySelectorAll("button[aria-label]").forEach((btn) => {
             const label = btn.getAttribute("aria-label");
-            if (!label || !MANAGEABLE.includes(label)) return;
+            if (!label) return;
             // skip buttons outside the sidebar area (x > 260)
             if (btn.getBoundingClientRect().x > 260) return;
-            btn.style.display =
-              state.global || (state.hidden || []).includes(label)
-                ? "none"
-                : "";
+
+            /* ---- Dynamic discovery ---- */
+            /* If this sidebar button's label is not in the base list, */
+            /* add it so the settings panel can render a row for it. */
+            if (!BASE_MANAGEABLE.includes(label)) {
+              _addDiscovered(label);
+            }
+
+            /* ---- Apply visibility ---- */
+            /* Hidden if global is on OR the label is in the hidden list. */
+            const shouldHide =
+              state.global || (state.hidden || []).includes(label);
+            btn.style.display = shouldHide ? "none" : "";
           });
         };
 
