@@ -171,14 +171,18 @@ window.__ModuleLoader__.load({
     /*  Prefer a structural sidebar container over the old `x > 260`     */
     /*  pixel band, which broke under zoom/RTL/wide windows and skipped  */
     /*  discovery for anything past 260px.                              */
+    /*                                                                      */
+    /*  Only unambiguous selectors are used: a bare `nav`/`aside` can     */
+    /*  match a non-sidebar element (breadcrumb, footer) and would then  */
+    /*  starve the plugin entirely, so those fall back to the known-      */
+    /*  working pixel band instead.                                       */
     /* ---------------------------------------------------------------- */
     function _sidebarScope(root) {
       return (
         root.querySelector("nav[aria-label]") ||
         root.querySelector("[data-sidebar]") ||
         root.querySelector("aside[aria-label]") ||
-        root.querySelector("nav") ||
-        root.querySelector("aside") ||
+        root.querySelector("[role='navigation']") ||
         root
       );
     }
