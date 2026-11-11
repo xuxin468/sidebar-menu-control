@@ -379,8 +379,9 @@ window.__ModuleLoader__.load({
     /*  Settings section UI                                               */
     /* ---------------------------------------------------------------- */
     function SettingsSection(props) {
-      const { form, ctx } = props;
-      const [snapshot, setSnapshot] = React.useState(form.getSnapshot());
+      const { form, ctx, panels: panelsProp, snap: snapProp } = props;
+      const [snapshot, setSnapshot] = React.useState(snapProp || form.getSnapshot());
+      const panels = panelsProp || manageablePanels(ctx);
 
       React.useEffect(() => {
         const offForm = form.subscribe(() => setSnapshot(form.getSnapshot()));
@@ -392,7 +393,6 @@ window.__ModuleLoader__.load({
       }, [form]);
 
       const value = readValue(snapshot);
-      const panels = manageablePanels(ctx);
       const hidden = readHidden(value, panels);
       const globalOn = !!value.global;
 
@@ -617,17 +617,19 @@ window.__ModuleLoader__.load({
           formsCtx.effect(
             () => {
               try {
-                return formsCtx.configForms.whileServed([NS], () => {
-                  const off = formsCtx.slots.inject("settings.section", () =>
-                    formsCtx.slots.register(
-                      {
-                        name: "settings.section",
-                        id: "sidebar-menu-control",
-                        order: 60,
-                        label: () => "侧栏菜单",
-                      },
-                      (props) => h(SettingsSection, { form: f, ctx: formsCtx }),
-                    ),
+                return formsCtx.slots.inject("settings.section", () => {
+                  const off = formsCtx.slots.register(
+                    {
+                      name: "settings.section",
+                      id: NS,
+                      order: 60,
+                      label: () => "侧栏菜单",
+                    },
+                    (props) => {
+                      const panels = manageablePanels(ctx);
+                      const snap = form ? readValue(form.getSnapshot()) : DEFAULT_VALUE;
+                      return h(SettingsSection, { form: f, ctx: formsCtx, panels, snap });
+                    },
                   );
                   return off;
                 });
