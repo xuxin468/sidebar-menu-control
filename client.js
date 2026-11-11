@@ -144,10 +144,21 @@ window.__ModuleLoader__.load({
     /*  Ledger reading                                                    */
     /* ---------------------------------------------------------------- */
     function readLedger(ctx) {
-      const reader = ctx && ctx.slots;
-      if (!reader || typeof reader.entriesOfSlot !== "function") return [];
+      /* `ctx.slots` is a declared inject (top-level `inject` array), so the
+       * runtime must be up before apply() runs. If it is not yet, throw a
+       * marker and let the caller fall back; a plain access throws the
+       * cordis "cannot get required service" error, which is not caught
+       * here and would propagate out of apply() and fail the whole entry. */
+      let slots;
       try {
-        return reader.entriesOfSlot(PANEL_LIST_SLOT) || [];
+        slots = ctx.slots;
+      } catch (e) {
+        if (e && /inactive context/.test(String(e.message))) return [];
+        throw e;
+      }
+      if (!slots || typeof slots.entriesOfSlot !== "function") return [];
+      try {
+        return slots.entriesOfSlot(PANEL_LIST_SLOT) || [];
       } catch (_) {
         return [];
       }
@@ -554,21 +565,27 @@ window.__ModuleLoader__.load({
           /* The Configure control exists exactly while the Host serves the
            * entry; whileServed also waits out the mirror's first read. */
           formsCtx.effect(
-            () =>
-              formsCtx.configForms.whileServed([NS], () => {
-                const off = formsCtx.slots.inject("settings.section", () =>
-                  formsCtx.slots.register(
-                    {
-                      name: "settings.section",
-                      id: "sidebar-menu-control",
-                      order: 60,
-                      label: () => "侧栏菜单",
-                    },
-                    (props) => h(SettingsSection, { form: f, ctx: formsCtx }),
-                  ),
-                );
-                return off;
-              }),
+            () => {
+              try {
+                return formsCtx.configForms.whileServed([NS], () => {
+                  const off = formsCtx.slots.inject("settings.section", () =>
+                    formsCtx.slots.register(
+                      {
+                        name: "settings.section",
+                        id: "sidebar-menu-control",
+                        order: 60,
+                        label: () => "侧栏菜单",
+                      },
+                      (props) => h(SettingsSection, { form: f, ctx: formsCtx }),
+                    ),
+                  );
+                  return off;
+                });
+              } catch (e) {
+                console.warn("[sidebar-menu-control] settings section deferred", e);
+                return () => {};
+              }
+            },
             "sidebar-menu-control: settings section",
           );
 
