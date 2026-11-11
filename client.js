@@ -143,18 +143,23 @@ window.__ModuleLoader__.load({
     /* ---------------------------------------------------------------- */
     /*  Ledger reading                                                    */
     /* ---------------------------------------------------------------- */
+    /*  A visibility plugin must never be able to fail web boot: any      */
+    /*  error from the slots service (inactive context during activation, */
+    /*  seat not ready, provider gone) degrades to the legacy label list. */
+    let _slotsWarned = false;
     function readLedger(ctx) {
-      /* `ctx.slots` is a declared inject (top-level `inject` array), so the
-       * runtime must be up before apply() runs. If it is not yet, throw a
-       * marker and let the caller fall back; a plain access throws the
-       * cordis "cannot get required service" error, which is not caught
-       * here and would propagate out of apply() and fail the whole entry. */
       let slots;
       try {
-        slots = ctx.slots;
+        slots = ctx && ctx.slots;
       } catch (e) {
-        if (e && /inactive context/.test(String(e.message))) return [];
-        throw e;
+        if (!_slotsWarned) {
+          _slotsWarned = true;
+          console.warn(
+            "[sidebar-menu-control] slots unavailable, using fallback labels",
+            e,
+          );
+        }
+        return [];
       }
       if (!slots || typeof slots.entriesOfSlot !== "function") return [];
       try {
@@ -480,10 +485,15 @@ window.__ModuleLoader__.load({
         let observer = null;
 
         /* ---- 1. Visibility engine (works without configForms) ---- */
+        /*  Guarded end-to-end: the first run happens synchronously inside
+         *  activation, and an uncaught throw there fails the entry — and with
+         *  it the whole web boot. Failures degrade to "leave the sidebar
+         *  alone" rather than bricking startup. */
         const applyVisibility = () => {
-          const state = form ? readValue(form.getSnapshot()) : DEFAULT_VALUE;
-          const root = document.getElementById("root");
-          if (!root) return;
+          try {
+            const state = form ? readValue(form.getSnapshot()) : DEFAULT_VALUE;
+            const root = document.getElementById("root");
+            if (!root) return;
 
           const scope = _sidebarScope(root);
           const rows = collectRows(scope);
@@ -518,6 +528,9 @@ window.__ModuleLoader__.load({
             if (shouldHide) hideButton(btn);
             else showButton(btn);
           });
+          } catch (e) {
+            console.warn("[sidebar-menu-control] visibility apply failed", e);
+          }
         };
 
         // rAF-coalesced trailing apply: a burst of mutations collapses to one
@@ -558,7 +571,13 @@ window.__ModuleLoader__.load({
         /* ---- 2. Lazy settings injection ---- */
         const setupSettings = (formsCtx) => {
           if (disposed) return;
-          const f = formsCtx.configForms && formsCtx.configForms.get(NS);
+          let f;
+          try {
+            f = formsCtx.configForms && formsCtx.configForms.get(NS);
+          } catch (e) {
+            console.warn("[sidebar-menu-control] settings namespace unavailable", e);
+            return;
+          }
           if (!f) return;
           form = f;
 
@@ -590,14 +609,32 @@ window.__ModuleLoader__.load({
           );
 
           /* Re-apply whenever our own settings change. */
-          f.subscribe(() => scheduleApply());
+          try {
+            f.subscribe(() => scheduleApply());
+          } catch (e) {
+            console.warn("[sidebar-menu-control] settings subscribe failed", e);
+          }
           scheduleApply();
         };
 
-        if (ctx.configForms) {
-          setupSettings(ctx);
-        } else if (typeof ctx.inject === "function") {
+        /* `configForms` is reached ONLY through a lazy inject. A direct
+         * `if (ctx.configForms)` probe throws "cannot get property
+         * configForms without inject" when the ui-settings provider has not
+         * committed the service yet — client entries activate concurrently
+         * during boot, so the probe is a race — and that throw fails this
+         * entry's activation, taking the whole web boot down with it
+         * ("Renderer recovery exhausted: web boot: 1 entry did not activate").
+         * The inject fires the moment the service appears and never fires in
+         * a composition that does not provide the settings service, which is
+         * exactly the documented degrade behaviour. */
+        if (typeof ctx.inject === "function") {
           ctx.inject(["configForms"], setupSettings);
+        } else {
+          try {
+            if (ctx.configForms) setupSettings(ctx);
+          } catch (e) {
+            console.warn("[sidebar-menu-control] settings service unavailable", e);
+          }
         }
 
         /* cleanup */

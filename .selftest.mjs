@@ -33,8 +33,8 @@ const slotConstantsSrc = sliceBetween(
   "const PANEL_LIST_SLOT =",
   "/* ----",
 );
-// readLedger
-const readLedgerSrc = sliceBetween("function readLedger(ctx)", "/* ----");
+// readLedger (incl. its warn latch)
+const readLedgerSrc = sliceBetween("let _slotsWarned = false;", "/* ----");
 // identityOf
 const identityOfSrc = sliceBetween("function identityOf(entry)", "/* ----");
 // keysOf
