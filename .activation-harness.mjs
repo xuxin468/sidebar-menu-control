@@ -1,6 +1,7 @@
 // Activation harness: replays client.js's factory + apply() under cordis
 // context-proxy semantics, for every boot-order scenario the web boot can
-// produce. Proves apply() can never fail entry activation.
+// produce, plus the sidebar DOM second pass (更多/远程控制 discovery, chrome
+// and centre-panel exclusion, hide/show bookkeeping).
 //
 // Cordis semantics modelled from @deepseek-ai/cordis lib/index.js
 // (ReflectService.handler.get):
@@ -23,18 +24,35 @@ const ok = (name, cond, detail) => {
   else { fail++; console.log("  FAIL " + name + (detail ? " — " + detail : "")); }
 };
 
-const settingsController = {
-  getSnapshot: () => ({ value: { global: false, hidden: [] } }),
-  set: async () => {},
-  subscribe: () => () => {},
-};
-const configFormsStub = {
-  get: (ns) => (ns === "sidebar-menu-control" ? settingsController : undefined),
-  whileServed: (ns, cb) => cb(),
-};
+function button(label, x) {
+  const btn = {
+    style: {
+      _p: new Map(),
+      getPropertyValue(k) { return this._p.get(k) ?? ""; },
+      setProperty(k, v) { this._p.set(k, v); },
+      removeProperty(k) { this._p.delete(k); },
+    },
+    getAttribute: (n) => (n === "aria-label" ? label : null),
+    getBoundingClientRect: () => ({ x, y: 10, width: 24, height: 24 }),
+    closest: (sel) => (sel === "button" ? btn : null),
+    querySelector: () => null,
+    hasAttribute: () => false,
+    display() { return btn.style._p.get("display"); },
+  };
+  return btn;
+}
 
-/** Fresh module instance + a fresh cordis-like ctx. */
-function boot({ services = {}, moduleInject = ["slots", "locale"] } = {}) {
+/**
+ * Fresh module instance + a fresh cordis-like ctx + an optional sidebar DOM.
+ * sideButtons: [{ label, x, anchored }] — anchored rows get a panellist
+ * anchor whose closest("button") is that exact button object.
+ */
+function boot({
+  services = {},
+  moduleInject = ["slots", "locale"],
+  ledger = [],
+  sideButtons = [],
+} = {}) {
   let registration;
   globalThis.window = { __ModuleLoader__: { load: (r) => { registration = r; } } };
 
@@ -44,8 +62,29 @@ function boot({ services = {}, moduleInject = ["slots", "locale"] } = {}) {
   const realWarn = console.warn;
   console.warn = (...args) => { warnings.push(args.map(String).join(" ")); };
 
+  const buttons = sideButtons.map((s) => ({ spec: s, btn: button(s.label, s.x) }));
+  const anchors = buttons
+    .filter((b) => b.spec.anchored)
+    .map((b) => ({
+      querySelector: () => null, // no plugin hook in these fixtures
+      closest: (sel) => (sel === "button" ? b.btn : null),
+      getAttribute: () => null,
+    }));
+
+  const scopeStub = buttons.length
+    ? {
+        querySelector: () => null,
+        querySelectorAll: (sel) => {
+          qsCalls.push(sel);
+          if (sel === '[data-slot="sidebar.panellist"]') return anchors;
+          if (sel === 'button[aria-label]') return buttons.map((b) => b.btn);
+          return [];
+        },
+      }
+    : null;
+
   const rootStub = {
-    querySelector: () => null,                 // no sidebar container -> falls back to root
+    querySelector: (sel) => (sel === "nav[aria-label]" && scopeStub ? scopeStub : null),
     querySelectorAll: (sel) => { qsCalls.push(sel); return []; },
   };
   globalThis.document = {
@@ -79,14 +118,13 @@ function boot({ services = {}, moduleInject = ["slots", "locale"] } = {}) {
   };
 
   const slotsStub = {
-    entriesOfSlot: () => [],
+    entriesOfSlot: (slot) => (slot === "sidebar.panellist" ? ledger : []),
     inject: (name, reg) => {
       if (name === "settings.section") state.settingsRegistered = !!reg;
       return () => {};
     },
     register: () => () => {},
   };
-
   const provided = { slots: slotsStub, locale: { bind: () => () => {} }, ...services };
 
   const ctx = {};
@@ -124,9 +162,18 @@ function boot({ services = {}, moduleInject = ["slots", "locale"] } = {}) {
     }
   };
 
-  return { registrationRan, mod, ctx, state, rafCbs, warnings, qsCalls,
+  return { registrationRan, mod, ctx, state, rafCbs, warnings, qsCalls, buttons,
     restore: () => { console.warn = realWarn; } };
 }
+
+const settingsForm = (value) => ({
+  get: (ns) => (ns === "sidebar-menu-control" ? {
+    getSnapshot: () => ({ value }),
+    set: async () => {},
+    subscribe: () => () => {},
+  } : undefined),
+  whileServed: (ns, cb) => cb(),
+});
 
 /* ------------------------------------------------------------------ */
 console.log("== module registration ==");
@@ -167,7 +214,7 @@ console.log("== S2: configForms arrives later — settings section registers =="
   ok("activation clean", threw === null, threw && threw.message);
 
   let lateThrew = null;
-  try { b.ctx.arrive("configForms", configFormsStub); }
+  try { b.ctx.arrive("configForms", settingsForm({ global: false, hidden: [] })); }
   catch (e) { lateThrew = e; }
   ok("late arrival fires deferred setupSettings without throwing",
     lateThrew === null, lateThrew && lateThrew.message);
@@ -196,7 +243,7 @@ console.log("== S3: slots service GONE (runtime teardown) — degrades, never th
 /* ------------------------------------------------------------------ */
 console.log("== S4: configForms present at activation (the lucky race) ==");
 {
-  const b = boot({ services: { configForms: configFormsStub } });
+  const b = boot({ services: { configForms: settingsForm({ global: false, hidden: [] }) } });
   let threw = null;
   try { b.mod.apply(b.ctx); } catch (e) { threw = e; }
   ok("apply() does NOT throw", threw === null, threw && threw.message);
@@ -213,6 +260,86 @@ console.log("== S5: settings service absent entirely — visibility still boots 
   ok("apply() does NOT throw", threw === null, threw && threw.message);
   ok("no warnings for a composition without settings",
     b.warnings.length === 0, b.warnings.join(" | "));
+  b.restore();
+}
+
+/* ------------------------------------------------------------------ */
+const domFixtures = () => ({
+  ledger: [{ options: { id: "panel-a", label: "Alpha", order: 1 } }],
+  sideButtons: [
+    { label: "Alpha", x: 50, anchored: true },  // ledger row via anchor
+    { label: "更多", x: 100 },                  // known, missing from ledger
+    { label: "New Chat", x: 120 },              // sidebar chrome
+    { label: "More", x: 800 },                  // centre-panel overflow
+  ],
+});
+const flushRaf = (b) => { const cbs = b.rafCbs.splice(0); cbs.forEach((cb) => cb()); };
+
+console.log("== S6a: DOM second pass with global ON — chrome and centre stay untouched ==");
+{
+  const f = domFixtures();
+  const b = boot({
+    ...f,
+    services: { configForms: settingsForm({ global: true, hidden: [] }) },
+  });
+  let threw = null;
+  try { b.mod.apply(b.ctx); } catch (e) { threw = e; }
+  ok("apply() clean", threw === null, threw && threw.message);
+  ok("no visibility warnings", b.warnings.length === 0, b.warnings.join(" | "));
+  flushRaf(b); // real browsers fire rAF; the harness flushes it to apply form-backed state
+  const alpha = b.buttons.find((x) => x.spec.label === "Alpha").btn;
+  const more = b.buttons.find((x) => x.spec.label === "更多").btn;
+  const chrome = b.buttons.find((x) => x.spec.label === "New Chat").btn;
+  const center = b.buttons.find((x) => x.spec.x === 800).btn;
+  ok("ledger row hidden by global", alpha.display() === "none", "display=" + alpha.display());
+  ok("sidebar 更多 hidden by global (was missing from the list)",
+    more.display() === "none", "display=" + more.display());
+  ok("chrome button untouched", chrome.display() === undefined, "display=" + chrome.display());
+  ok("centre-panel More untouched", center.display() === undefined, "display=" + center.display());
+  b.restore();
+}
+
+console.log("== S6b: DOM second pass — hidden:['more'] hides only 更多 ==");
+{
+  const f = domFixtures();
+  const b = boot({
+    ...f,
+    services: { configForms: settingsForm({ global: false, hidden: ["更多"] }) },
+  });
+  let threw = null;
+  try { b.mod.apply(b.ctx); } catch (e) { threw = e; }
+  ok("apply() clean", threw === null, threw && threw.message);
+  flushRaf(b);
+  const alpha = b.buttons.find((x) => x.spec.label === "Alpha").btn;
+  const more = b.buttons.find((x) => x.spec.label === "更多").btn;
+  const chrome = b.buttons.find((x) => x.spec.label === "New Chat").btn;
+  const center = b.buttons.find((x) => x.spec.x === 800).btn;
+  ok("legacy hidden label 更多 applies to the discovered button",
+    more.display() === "none", "display=" + more.display());
+  ok("visible ledger row untouched", alpha.display() === undefined, "display=" + alpha.display());
+  ok("chrome untouched", chrome.display() === undefined);
+  ok("centre overflow untouched", center.display() === undefined);
+  b.restore();
+}
+
+/* ------------------------------------------------------------------ */
+console.log("== S6c: ledger row rendered with a plugin hook is still controllable ==");
+{
+  const b = boot({
+    ledger: [{ options: { id: "panel-hook", label: "Remote", order: 1 } }],
+    sideButtons: [
+      // not anchored: collectRows skips hooked rows, second pass must own it
+      { label: "Remote", x: 90 },
+    ],
+    services: { configForms: settingsForm({ global: false, hidden: ["panel-hook"] }) },
+  });
+  let threw = null;
+  try { b.mod.apply(b.ctx); } catch (e) { threw = e; }
+  ok("apply() clean", threw === null, threw && threw.message);
+  flushRaf(b);
+  const remote = b.buttons[0].btn;
+  ok("hooked ledger row hidden via its panel id",
+    remote.display() === "none", "display=" + remote.display());
   b.restore();
 }
 

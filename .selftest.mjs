@@ -69,11 +69,12 @@ ${keysOfSrc}
 ${manageableSrc}
 ${readHiddenSrc}
 ${collectRowsSrc}
-return { identityOf, keysOf, readHidden, collectRows, manageablePanels, keyOf, unwrap, readValue, ALIAS, BASE_MANAGEABLE };
+return { identityOf, keysOf, readHidden, collectRows, manageablePanels, keyOf, unwrap, readValue, ALIAS, BASE_MANAGEABLE, _addDiscovered, _discovered, _onDiscover };
 `;
 
 const mod = new Function(factorySrc)();
-const { identityOf, keysOf, readHidden, collectRows, manageablePanels, keyOf, unwrap, readValue, BASE_MANAGEABLE } = mod;
+const { identityOf, keysOf, readHidden, collectRows, manageablePanels, keyOf, unwrap, readValue, BASE_MANAGEABLE, _addDiscovered, _discovered, _onDiscover } = mod;
+const freshFactory = () => new Function(factorySrc)();
 
 let pass = 0, fail = 0;
 const eq = (name, actual, expected) => {
@@ -200,6 +201,51 @@ eq("missing value falls back to defaults", readValue({ status: "unavailable" }),
 eq("null snapshot falls back to defaults", readValue(null), { global: false, hidden: [] });
 eq("cosmokit Volatile box is unwrapped", readValue({ value: { get: () => ({ global: true, hidden: [] }) } }).global, true);
 eq("Volatile box with global=false stays false", readValue({ value: { get: () => ({ global: false, hidden: [] }) } }).global, false);
+
+console.log("== DOM-discovered menus join the ledger list (更多/远程控制 scenario) ==");
+{
+  const m = freshFactory(); // isolated _discovered state
+  const before = m.manageablePanels(ledgerCtx);
+  eq("ledger list has no discovered items yet",
+    before.some((p) => p.id === "more"), false);
+
+  m._addDiscovered("更多");
+  m._addDiscovered("远程控制");
+  const after = m.manageablePanels(ledgerCtx);
+  const ids = after.map((p) => p.id);
+  eq("discovered menus appear alongside ledger panels",
+    ids.includes("more") && ids.includes("remotecontrol") && ids.includes("panel-a") && ids.includes("panel-b"),
+    true, JSON.stringify(ids));
+  eq("discovered rows carry stable locale-alias ids", ids.includes("more"), true);
+  eq("discovered rows marked fallback",
+    after.filter((p) => p.fallback === true).length, 2);
+
+  // Locale switch refreshes the displayed label, key stays put.
+  m._addDiscovered("More");
+  eq("label refreshed to current locale, key stable",
+    m._discovered.get("more"), "More");
+  eq("no duplicate key created",
+    m.manageablePanels(ledgerCtx).filter((p) => p.id === "more").length, 1);
+
+  // Discovery notifies listeners once (coalesced) outside the render phase.
+  let notified = 0;
+  const off = m._onDiscover(() => { notified++; });
+  m._addDiscovered("Brand New Menu");
+  m._addDiscovered("Brand New Menu"); // unchanged -> no re-notify
+  await Promise.resolve();
+  await Promise.resolve();
+  eq("listener notified exactly once (coalesced, unchanged skipped)", notified, 1);
+  off();
+}
+{
+  // readHidden keeps legacy 更多 entries applied to the discovered panel.
+  const m = freshFactory();
+  m._addDiscovered("更多");
+  const list = m.manageablePanels({ slots: null }); // BASE + discovered
+  const h = m.readHidden({ hidden: ["更多", "More"] }, list);
+  eq("legacy 更多 hidden entry maps to discovered id",
+    h.has("more"), true);
+}
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

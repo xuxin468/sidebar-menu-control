@@ -125,6 +125,12 @@ window.__ModuleLoader__.load({
       return ALIAS[k] || k;
     };
 
+    /* Known-manageable keys, used by the ledger mode's DOM second pass so
+     * sidebar chrome (collapse, avatar, new-chat, …) is never mistaken for a
+     * controllable menu, while known menus absent from the ledger (更多 /
+     * 远程控制 — plugin rows and overflow controls) still surface. */
+    const BASE_KEYS = new Set(BASE_MANAGEABLE.map(keyOf));
+
     /* ---------------------------------------------------------------- */
     /*  Volatile-ref unwrap                                               */
     /* ---------------------------------------------------------------- */
@@ -204,23 +210,28 @@ window.__ModuleLoader__.load({
         seen.add(p.id);
         panels.push(p);
       }
-      if (panels.length) {
-        panels.sort((a, b) => a.order - b.order || a.label.localeCompare(b.label));
-        return panels;
+
+      // No ledger at all: seed the known labels (legacy hosts).
+      if (!panels.length) {
+        for (const label of BASE_MANAGEABLE) {
+          const key = keyOf(label);
+          if (!key || seen.has(key)) continue;
+          seen.add(key);
+          panels.push({ id: key, label, order: 9999, fallback: true });
+        }
       }
 
-      // Fallback: no ledger. Use the known labels, then discovered ones.
-      for (const label of BASE_MANAGEABLE) {
-        const key = keyOf(label);
-        if (!key || seen.has(key)) continue;
-        seen.add(key);
-        panels.push({ id: key, label, order: 9999, fallback: true });
-      }
+      // Menus discovered in the DOM but absent from the ledger (plugin rows
+      // rendered outside the seat, overflow controls like 更多) join the list
+      // in BOTH modes, so the settings panel always shows every button the
+      // visibility engine can control.
       for (const [key, label] of _discovered) {
         if (seen.has(key)) continue;
         seen.add(key);
         panels.push({ id: key, label, order: 9999, fallback: true });
       }
+
+      panels.sort((a, b) => a.order - b.order || a.label.localeCompare(b.label));
       return panels;
     }
 
@@ -233,12 +244,17 @@ window.__ModuleLoader__.load({
 
     function _addDiscovered(label) {
       const key = keyOf(label);
-      if (!key || _discovered.has(key)) return;
-      _discovered.set(key, label);
-      if (_discovered.size > 128) {
+      if (!key) return;
+      const existing = _discovered.get(key);
+      if (existing === label) return; // unchanged (same locale, same name)
+      const isNew = existing === undefined;
+      if (isNew && _discovered.size > 128) {
         // Bound growth: drop the oldest half once the cap is exceeded.
         [..._discovered.keys()].slice(0, 64).forEach((k) => _discovered.delete(k));
       }
+      // Insert new keys and refresh stale labels (locale switch) alike — the
+      // key stays stable, only the displayed name follows the UI language.
+      _discovered.set(key, label);
       if (!_discoverListeners.length) return;
       // Notify outside the render phase — listeners call setState.
       if (_discoverScheduled) return;
@@ -501,30 +517,45 @@ window.__ModuleLoader__.load({
           const hidden = readHidden(state, panels);
           const globalOn = !!state.global;
 
+          const handled = new Set();
           if (rows.size) {
             /* Ledger path: match the shell's own resolved labels. */
             for (const panel of panels) {
               const btn = rows.get(panel.label);
               if (!btn) continue;
+              handled.add(btn);
               if (globalOn || hidden.has(panel.id)) hideButton(btn);
               else showButton(btn);
             }
-            return;
           }
 
-          /* Fallback path: no slot anchors in the DOM. Scan every button in
-           * the sidebar by aria-label, as older versions did. */
+          /* Second pass over every aria-label button the anchor path did not
+           * own. In ledger mode this picks up exactly the known menus the
+           * ledger is missing — plugin-hooked rows (远程控制), overflow
+           * controls (更多) — while sidebar chrome (collapse, avatar, …)
+           * stays out of the settings list; the no-ledger fallback keeps its
+           * historical discover-everything behaviour. A hard 350px band
+           * keeps centre-panel buttons (chat toolbars with their own 更多)
+           * out of reach in every mode. */
           const useXBand = scope === root;
+          const ledgerMode = rows.size > 0;
           scope.querySelectorAll("button[aria-label]").forEach((btn) => {
+            if (handled.has(btn)) return;
             const label = btn.getAttribute("aria-label");
             if (!label) return;
-            if (useXBand && btn.getBoundingClientRect().x > 260) return;
+            const x = btn.getBoundingClientRect().x;
+            if (x > 350) return;
+            if (useXBand && x > 260) return;
 
-            /* ---- Dynamic discovery (fallback path only) ---- */
-            if (!BASE_MANAGEABLE.includes(label)) _addDiscovered(label);
-
-            const panel = panels.find((p) => keysOf(p).has(keyOf(label)));
-            const shouldHide = globalOn || (panel ? hidden.has(panel.id) : hidden.has(keyOf(label)));
+            const key = keyOf(label);
+            const panel = panels.find((p) => keysOf(p).has(key));
+            if (!panel) {
+              const known =
+                BASE_KEYS.has(key) || _discovered.has(key) || hidden.has(key);
+              if (ledgerMode && !known) return;
+              _addDiscovered(label);
+            }
+            const shouldHide = globalOn || hidden.has(panel ? panel.id : key);
             if (shouldHide) hideButton(btn);
             else showButton(btn);
           });
